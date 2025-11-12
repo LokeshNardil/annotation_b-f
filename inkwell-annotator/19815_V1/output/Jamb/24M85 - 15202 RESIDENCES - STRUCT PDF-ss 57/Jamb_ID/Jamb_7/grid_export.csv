@@ -1,0 +1,17 @@
+jamb_id,x,y,tie,layer,intersection,grid_label,orientation,boundary_relation,side,primary_grid_overlap,bar_size,Grade,jamb_length,cover,spacing,quantity,Bar Spacing
+7,6182,998,Primary,1,False,Grid6,Vertical,Left,N/A,,#6,#6,#6,,0-6,#6,0
+7,6182,1700,Primary,1,False,Grid2,Vertical,Left,N/A,,#6,#6,#6,,0-6,#6,0
+7,6182,1349,Primary,1,False,Grid4,Vertical,Left,N/A,,#6,#6,#6,,0-6,#6,0
+7,6183,1875,Primary,1,False,Grid1,Vertical,Left,N/A,,#6,#6,#6,,0-6,#6,0
+7,6182,1174,Primary,1,False,Grid5,Vertical,Left,N/A,,#6,#6,#6,,0-6,#6,0
+7,6182,1525,Primary,1,False,Grid3,Vertical,Left,N/A,,#6,#6,#6,,0-6,#6,0
+7,6521,997,Primary,2,False,Grid6,Vertical,Right,N/A,,#6,#6,#6,,0-6,#6,0
+7,6521,1701,Primary,2,False,Grid2,Vertical,Right,N/A,,#6,#6,#6,,0-6,#6,0
+7,6521,1173,Primary,2,False,Grid5,Vertical,Right,N/A,,#6,#6,#6,,0-6,#6,0
+7,6521,1348,Primary,2,False,Grid4,Vertical,Right,N/A,,#6,#6,#6,,0-6,#6,0
+7,6522,1875,Primary,2,False,Grid1,Vertical,Right,N/A,,#6,#6,#6,,0-6,#6,0
+7,6521,1524,Primary,2,False,Grid3,Vertical,Right,N/A,,#6,#6,#6,,0-6,#6,0
+7,6295,998,Primary,3,False,Grid6,Vertical,,N/A,,#6,#6,#6,,0-6,#6,0
+7,6295,1875,Primary,3,False,Grid1,Vertical,,N/A,,#6,#6,#6,,0-6,#6,0
+7,6408,998,Primary,4,False,Grid6,Vertical,,N/A,,#6,#6,#6,,0-6,#6,0
+7,6410,1876,Primary,4,False,Grid1,Vertical,,N/A,,#6,#6,#6,,0-6,#6,0

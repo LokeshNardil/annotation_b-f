@@ -1,0 +1,6 @@
+jamb_id,tie_id,tie_type,corner 1,corner 2,corner 3,corner 4
+8,T9,Cross Tie,"[Primary Tie, Layer: 2, Grid6]","[Primary Tie, Layer: 2, Grid1]",,
+8,T9,Cross Tie,"[Primary Tie, Layer: 2, Grid2]","[Primary Tie, Layer: 2, Grid2]",,
+8,T9,Cross Tie,"[Primary Tie, Layer: 2, Grid4]","[Primary Tie, Layer: 2, Grid4]",,
+8,T9,Cross Tie,"[Primary Tie, Layer: 2, Grid5]","[Primary Tie, Layer: 2, Grid5]",,
+8,T9,Cross Tie,"[Primary Tie, Layer: 2, Grid3]","[Primary Tie, Layer: 2, Grid3]",,

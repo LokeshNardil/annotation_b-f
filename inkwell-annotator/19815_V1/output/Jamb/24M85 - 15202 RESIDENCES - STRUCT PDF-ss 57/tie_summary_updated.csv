@@ -1,0 +1,4 @@
+jamb_id,tie_type,corner_1_x,corner_1_y,corner_2_x,corner_2_y,corner_3_x,corner_3_y,corner_4_x,corner_4_y,jamb_type,folder,Sheet No,Detail Number,Detail Name,Reference,Zone_x_start,Zone_x_end,Zone_y_start,Zone_y_end,Jamb Length Text,Jamb Ties Text,Category,cover,Name
+2,Primary,4489.0,943.0,4877.0,943.0,4489.0,1959.0,4877.0,1959.0,Free,24M85 - 15202 RESIDENCES - STRUCT PDF-ss 57,nan,nan,nan,nan/nan,4400.0,4995.0,2469.0,902.0,,,Type,,8R
+5,Primary,5315.0,931.0,5703.0,931.0,5315.0,1963.0,5703.0,1963.0,Free,24M85 - 15202 RESIDENCES - STRUCT PDF-ss 57,nan,nan,nan,nan/nan,5270.0,5808.0,2449.0,870.0,,,Type,,12R
+7,Primary,6108.0,931.0,6598.0,931.0,6108.0,1947.0,6598.0,1947.0,Free,24M85 - 15202 RESIDENCES - STRUCT PDF-ss 57,nan,nan,nan,nan/nan,6023.0,6659.0,2416.0,850.0,,,Type,,16R

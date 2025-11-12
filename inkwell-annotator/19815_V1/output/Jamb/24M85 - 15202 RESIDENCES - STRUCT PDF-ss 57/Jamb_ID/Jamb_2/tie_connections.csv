@@ -1,0 +1,3 @@
+jamb_id,tie_id,tie_type,corner 1,corner 2,corner 3,corner 4,bar_size,spacing,grade
+2,T9,Cross Tie,"[Primary Tie, Layer: 1, Grid2]","[Primary Tie, Layer: 2, Grid2]",,,#3,,A615 GRADE 60
+2,T1,Close Tie,"[Primary Tie, Layer: 1, Grid2]","[Primary Tie, Layer: 2, Grid2]","[Primary Tie, Layer: 1, Grid1]","[Primary Tie, Layer: 2, Grid1]",#3,,A615 GRADE 60
