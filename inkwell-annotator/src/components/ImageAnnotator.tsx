@@ -354,6 +354,9 @@ export const ImageAnnotator = () => {
   );
   const previewUpdateTimeoutRef = useRef<number | null>(null);
   const renderRef = useRef<() => void>(() => {});
+  const panTargetRef = useRef<{ x: number; y: number } | null>(null);
+  const panAnimationFrameRef = useRef<number | null>(null);
+  const pendingOcrEditsRef = useRef<Map<string, string>>(new Map());
 
   const reconcileAnnotationParents = useCallback(() => {
     useAnnotationStore.setState((state) => {
@@ -364,6 +367,74 @@ export const ImageAnnotator = () => {
       return { annotations: linked };
     });
   }, []);
+
+  const cancelPanAnimation = useCallback(() => {
+    if (panAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(panAnimationFrameRef.current);
+      panAnimationFrameRef.current = null;
+    }
+    panTargetRef.current = null;
+  }, []);
+
+  const setPanPosition = useCallback(
+    (targetX: number, targetY: number, options?: { smooth?: boolean }) => {
+      const smooth = options?.smooth ?? true;
+      const state = useAnnotationStore.getState();
+      const currentScale = state.transform.scale;
+
+      if (!smooth) {
+        cancelPanAnimation();
+        state.setTransform({ scale: currentScale, translateX: targetX, translateY: targetY });
+        renderRef.current?.();
+        return;
+      }
+
+      panTargetRef.current = { x: targetX, y: targetY };
+
+      if (panAnimationFrameRef.current !== null) {
+        return;
+      }
+
+      const step = () => {
+        const target = panTargetRef.current;
+        if (!target) {
+          panAnimationFrameRef.current = null;
+          return;
+        }
+
+        const latestState = useAnnotationStore.getState();
+        const { translateX, translateY } = latestState.transform;
+
+        const easing = 0.28;
+        const nextX = translateX + (target.x - translateX) * easing;
+        const nextY = translateY + (target.y - translateY) * easing;
+
+        const reachedX = Math.abs(target.x - translateX) < 0.4;
+        const reachedY = Math.abs(target.y - translateY) < 0.4;
+
+        if (reachedX && reachedY) {
+          latestState.setTransform({
+            translateX: target.x,
+            translateY: target.y,
+          });
+          renderRef.current?.();
+          panAnimationFrameRef.current = null;
+          panTargetRef.current = null;
+          return;
+        }
+
+        latestState.setTransform({
+          translateX: nextX,
+          translateY: nextY,
+        });
+        renderRef.current?.();
+        panAnimationFrameRef.current = requestAnimationFrame(step);
+      };
+
+      panAnimationFrameRef.current = requestAnimationFrame(step);
+    },
+    [cancelPanAnimation],
+  );
 
   useEffect(() => {
     return () => {
@@ -828,131 +899,48 @@ export const ImageAnnotator = () => {
     clearEditingState();
   }, [editingId, store.annotations, getAnnotationOptions, clearEditingState, store]);
 
-  const finalizeOcrTextEditing = useCallback(async () => {
-    if (!editingId) return;
-    const newText = (editingValue || "").trim();
+  const finalizeOcrTextEditing = useCallback(
+    async (options?: { skipToast?: boolean }) => {
+      if (!editingId) return;
+      const newText = (editingValue || "").trim();
 
-    console.log("[OCR] finalizeOcrTextEditing invoked", {
-      editingId,
-      newText,
-    });
-
-    store.updateAnnotation(editingId, { label: newText });
-    if (typeof store.saveToLocalStorage === "function") {
-      store.saveToLocalStorage();
-    }
-
-    const currentImage = uploadedImages.find((entry) => entry.id === currentImageId) ?? null;
-    let apiError: string | null = null;
-
-    if (currentImage?.ocrCsvPath) {
-      const ocrAnnotations = store.annotations.filter((ann) => {
-        const isOcrLike = ann.category === "ocr" || Boolean(ann.ocrLabel);
-        if (!isOcrLike) return false;
-        if (!currentImageId) return true;
-        return ann.parentId === currentImageId || !ann.parentId;
+      console.log("[OCR] finalizeOcrTextEditing invoked", {
+        editingId,
+        newText,
       });
 
-      const payload = {
-        relative_csv_path: currentImage.ocrCsvPath,
-        annotations: ocrAnnotations.map((ann) => ({
-          id: ann.id,
-          x: ann.x,
-          y: ann.y,
-          width: ann.w,
-          height: ann.h,
-          text: ann.label ?? "",
-          label: ann.ocrLabel ?? ann.label ?? "",
-          confidence: (ann as any).confidence ?? null,
-        })),
-      };
-
-      if (currentImage?.ocrCsvPath) {
-        const primaryBase = resolveApiBaseUrl();
-        const fallbackBase = "http://127.0.0.1:8000";
-        const basesToTry = primaryBase === fallbackBase ? [primaryBase] : [primaryBase, fallbackBase];
-
-        console.log("[OCR] Persisting annotations to backend", {
-          imageId: currentImageId,
-          csvPath: currentImage.ocrCsvPath,
-          annotationCount: payload.annotations.length,
-          bases: basesToTry,
-        });
-
-        let persisted = false;
-        let lastError: unknown = null;
-
-        for (const apiBase of basesToTry) {
-          try {
-            console.log("[OCR] Using API base", apiBase);
-            const response = await fetch(`${apiBase}/annotations/ocr/save`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-            if (!response.ok) {
-              const message = await response.text();
-              throw new Error(message || response.statusText);
-            }
-            const result = await response.json();
-            console.log("[OCR] CSV persisted", {
-              path: result.csv_path,
-              rows: result.rows,
-              annotations: payload.annotations.length,
-              apiBase,
-            });
-            toast.success?.(
-              `OCR text updated (saved ${result.rows ?? payload.annotations.length} rows to backend)`
-            );
-            persisted = true;
-            break;
-          } catch (err) {
-            console.error(`[OCR] Persist attempt failed for ${apiBase}`, err);
-            lastError = err;
-          }
-        }
-
-        if (!persisted && lastError) {
-          apiError = lastError instanceof Error ? lastError.message : "Unknown error";
-        }
-      } else {
-        console.log("[OCR] Skipping backend persist – no CSV path for image", {
-          imageId: currentImageId,
-          imageName: currentImage?.name,
-          defaultMeta: defaultAssetMeta.get(currentImageId),
-          uploadedImage: currentImage,
-        });
-        toast.success?.("OCR text updated (local storage only)");
+      const annotation = store.annotations.find((ann) => ann.id === editingId);
+      if (!annotation) {
+        clearEditingState();
+        return;
       }
-    } else {
-      console.log("[OCR] Skipping backend persist – no CSV path for image", {
-        imageId: currentImageId,
-        imageName: currentImage?.name,
-        defaultMeta: defaultAssetMeta.get(currentImageId),
-        uploadedImage: currentImage,
+
+      const originalValue = initialEditingValueRef.current ?? annotation.label ?? "";
+      store.updateAnnotation(editingId, { label: newText });
+
+      if (newText === originalValue) {
+        pendingOcrEditsRef.current.delete(editingId);
+        if (!options?.skipToast) {
+          toast.info?.("OCR text unchanged.");
+        }
+        clearEditingState();
+        return;
+      }
+
+      pendingOcrEditsRef.current.set(editingId, newText);
+
+      if (!options?.skipToast) {
+        toast.success?.("OCR change queued. Press Ctrl+S to write to CSV.");
+      }
+
+      requestAnimationFrame(() => {
+        renderRef.current();
       });
-      toast.success?.("OCR text updated (local storage only)");
-    }
 
-    requestAnimationFrame(() => {
-      renderRef.current();
-    });
-
-    if (apiError) {
-      toast.error?.(`OCR text saved locally, CSV update failed: ${apiError}`);
-    }
-
-    clearEditingState();
-  }, [
-    editingId,
-    editingValue,
-    store,
-    clearEditingState,
-    uploadedImages,
-    currentImageId,
-    defaultAssetMeta,
-    setUploadedImages,
-  ]);
+      clearEditingState();
+    },
+    [editingId, editingValue, store, clearEditingState],
+  );
 
   const cancelOcrTextEditing = useCallback(() => {
     if (!editingId) {
@@ -966,6 +954,97 @@ export const ImageAnnotator = () => {
     });
     clearEditingState();
   }, [editingId, clearEditingState, store]);
+
+  const commitPendingOcrEdits = useCallback(async () => {
+    if (editingId) {
+      await finalizeOcrTextEditing({ skipToast: true });
+    }
+
+    if (pendingOcrEditsRef.current.size === 0) {
+      toast.info?.("No OCR edits to save.");
+      return;
+    }
+
+    const currentImage = uploadedImages.find((entry) => entry.id === currentImageId) ?? null;
+    if (!currentImage) {
+      toast.error?.("No active image found; cannot save OCR edits.");
+      return;
+    }
+
+    if (!currentImage.ocrCsvPath) {
+      toast.error?.("This image does not have an OCR CSV path configured.");
+      return;
+    }
+
+    const ocrAnnotations = store.annotations.filter((ann) => ann.category === "ocr" || Boolean(ann.ocrLabel));
+
+    const payload = {
+      relative_csv_path: currentImage.ocrCsvPath,
+      annotations: ocrAnnotations.map((ann) => ({
+        id: ann.id,
+        x: ann.x,
+        y: ann.y,
+        width: ann.w,
+        height: ann.h,
+        text: ann.label ?? "",
+        label: ann.ocrLabel ?? ann.label ?? "",
+        confidence: (ann as any).confidence ?? null,
+      })),
+    };
+
+    const primaryBase = resolveApiBaseUrl();
+    const fallbackBase = "http://127.0.0.1:8000";
+    const basesToTry = primaryBase === fallbackBase ? [primaryBase] : [primaryBase, fallbackBase];
+
+    let persisted = false;
+    let lastError: unknown = null;
+
+    for (const apiBase of basesToTry) {
+      try {
+        console.log("[OCR] Saving pending edits to CSV", {
+          apiBase,
+          csvPath: currentImage.ocrCsvPath,
+          pendingCount: pendingOcrEditsRef.current.size,
+          totalAnnotations: payload.annotations.length,
+        });
+        const response = await fetch(`${apiBase}/annotations/ocr/save`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || response.statusText);
+        }
+        const result = await response.json();
+        console.log("[OCR] CSV persist successful", result);
+        persisted = true;
+        break;
+      } catch (error) {
+        console.error(`[OCR] Failed saving to ${apiBase}`, error);
+        lastError = error;
+      }
+    }
+
+    if (!persisted) {
+      toast.error?.(
+        `Failed to save OCR CSV: ${
+          lastError instanceof Error ? lastError.message : "Unknown error"
+        }`,
+      );
+      return;
+    }
+
+    pendingOcrEditsRef.current.clear();
+    store.saveToLocalStorage?.();
+    toast.success?.("OCR edits saved to CSV.");
+  }, [
+    currentImageId,
+    editingId,
+    finalizeOcrTextEditing,
+    store,
+    uploadedImages,
+  ]);
 
   const handleOverlayDismiss = useCallback(() => {
     setIsDropdownOpen(false);
@@ -1078,6 +1157,7 @@ export const ImageAnnotator = () => {
     const translateX = (viewportWidth - scaledWidth) / 2;
     const translateY = (viewportHeight - scaledHeight) / 2;
     
+    cancelPanAnimation();
     store.setTransform({ scale, translateX, translateY });
     
     // Reset scroll to top-left to show centered image
@@ -1086,11 +1166,12 @@ export const ImageAnnotator = () => {
       scrollContainer.scrollLeft = 0;
       scrollContainer.scrollTop = 0;
     });
-  }, [store]);
+  }, [store, cancelPanAnimation]);
 
   // Zoom with cursor as anchor
   const zoomAt = useCallback((clientX: number, clientY: number, delta: number) => {
     if (!canvasRef.current || !scrollContainerRef.current || !store.image) return;
+    cancelPanAnimation();
     
     const canvas = canvasRef.current;
     const scrollContainer = scrollContainerRef.current;
@@ -1135,7 +1216,7 @@ export const ImageAnnotator = () => {
       scrollContainer.scrollLeft = scrollLeft;
       scrollContainer.scrollTop = scrollTop;
     });
-  }, [store]);
+  }, [store, cancelPanAnimation]);
 
   const loadDefaultOcrAnnotations = useCallback(
     async (imageId: string, csvUrl: string, csvPath: string | undefined) => {
@@ -1743,8 +1824,8 @@ export const ImageAnnotator = () => {
     viewportWidth = Math.floor(Math.min(Math.max(100, viewportWidth), maxWidth));
     viewportHeight = Math.floor(Math.min(Math.max(100, viewportHeight), maxHeight));
 
-    const canvasWidth = Math.min(Math.max(viewportWidth, wrapperWidth), Math.max(maxWidth, 1) * 2);
-    const canvasHeight = Math.min(Math.max(viewportHeight, wrapperHeight), Math.max(maxHeight, 1) * 2);
+    const canvasWidth = Math.max(viewportWidth, wrapperWidth);
+    const canvasHeight = Math.max(viewportHeight, wrapperHeight);
 
     // Canvas size - needs to cover wrapper area to prevent black gaps during panning
     canvas.width = canvasWidth * dpr;
@@ -2067,6 +2148,8 @@ export const ImageAnnotator = () => {
     renderRef.current = render;
   }, [render]);
 
+  useEffect(() => () => cancelPanAnimation(), [cancelPanAnimation]);
+
   const sendCursorIfNeeded = useCallback(
     (imageX: number, imageY: number) => {
       if (!realtimeEnabled) return;
@@ -2093,6 +2176,7 @@ export const ImageAnnotator = () => {
     // Pan with space or middle mouse (Revu-style panning)
     if (e.button === 1 || (e.button === 0 && e.nativeEvent.getModifierState?.("Space"))) {
       store.setPanning(true);
+      cancelPanAnimation();
       // Store initial mouse position and initial transform for smooth panning
       setDragOffset({ x, y });
       setPanStartTransform({ 
@@ -2276,7 +2360,7 @@ export const ImageAnnotator = () => {
       }
       setMarqueeStart({ x, y });
     }
-  }, [store, screenToImage, hitTestAnnotation, hitTestHandle, openLabelEditor, openTextEditor, isProfileLabel, selectedIdList, sendCursorIfNeeded]);
+  }, [store, screenToImage, hitTestAnnotation, hitTestHandle, openLabelEditor, openTextEditor, isProfileLabel, selectedIdList, sendCursorIfNeeded, cancelPanAnimation]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -2290,26 +2374,13 @@ export const ImageAnnotator = () => {
     store.setMousePos({ x, y, imageX: imagePos.x, imageY: imagePos.y });
     sendCursorIfNeeded(imagePos.x, imagePos.y);
 
-    // Panning (Revu-style: smooth, direct image movement)
+    // Panning (Revu-style)
     if (store.isPanning && dragOffset && panStartTransform) {
-      // Calculate mouse movement in screen coordinates
       const dx = x - dragOffset.x;
       const dy = y - dragOffset.y;
-      
-      // For Revu-style panning:
-      // - Mouse moves right → image moves right (translateX increases)
-      // - Mouse moves down → image moves down (translateY increases)
-      // Directly add mouse movement to initial transform for smooth, predictable panning
       const newTranslateX = panStartTransform.translateX + dx;
       const newTranslateY = panStartTransform.translateY + dy;
-      
-      store.setTransform({
-        scale: store.transform.scale,
-        translateX: newTranslateX,
-        translateY: newTranslateY,
-      });
-      
-      // render() will be called automatically by the render loop when transform changes
+      setPanPosition(newTranslateX, newTranslateY, { smooth: false });
       return;
     }
 
@@ -2422,8 +2493,7 @@ export const ImageAnnotator = () => {
 
     // Update cursor
     if (store.isPanning) {
-      // Keep default cursor during panning (no hand symbol)
-      if (canvas) canvas.style.cursor = "default";
+      if (canvas) canvas.style.cursor = "grabbing";
     } else if (store.currentTool === "select") {
       let cursor = "default";
       const selected = store.annotations.filter((a) => selectedIdSet.has(a.id));
@@ -2459,7 +2529,22 @@ export const ImageAnnotator = () => {
     } else if (store.currentTool === "rectangle") {
       if (canvas) canvas.style.cursor = "crosshair";
     }
-  }, [store, screenToImage, dragOffset, resizeHandle, marqueeStart, hitTestAnnotation, hitTestHandle, render, selectedIdList]);
+  }, [
+    store,
+    screenToImage,
+    dragOffset,
+    panStartTransform,
+    setPanPosition,
+    sendCursorIfNeeded,
+    initialMouseOffset,
+    dragStartPositions,
+    resizeHandle,
+    marqueeStart,
+    hitTestAnnotation,
+    hitTestHandle,
+    render,
+    selectedIdList,
+  ]);
 
   // Global mouse move handler for dragging and panning (when mouse leaves canvas)
   useEffect(() => {
@@ -2476,19 +2561,14 @@ export const ImageAnnotator = () => {
       
       store.setMousePos({ x, y, imageX: imagePos.x, imageY: imagePos.y });
 
-      // Panning (Revu-style)
+      // Panning (Revu-style with smoothing)
       if (store.isPanning && dragOffset && panStartTransform) {
         const dx = x - dragOffset.x;
         const dy = y - dragOffset.y;
-        
+
         const newTranslateX = panStartTransform.translateX + dx;
         const newTranslateY = panStartTransform.translateY + dy;
-        
-        store.setTransform({
-          scale: store.transform.scale,
-          translateX: newTranslateX,
-          translateY: newTranslateY,
-        });
+        setPanPosition(newTranslateX, newTranslateY, { smooth: false });
         return;
       }
 
@@ -2592,6 +2672,7 @@ export const ImageAnnotator = () => {
       store.setDragging(false);
       store.setResizing(false);
       store.setPanning(false);
+      cancelPanAnimation();
       setDragOffset(null);
       setDragStartPositions(new Map());
       setInitialMouseOffset(null);
@@ -2609,9 +2690,25 @@ export const ImageAnnotator = () => {
       document.removeEventListener("mousemove", handleGlobalMouseMove);
       document.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [store.isDragging, store.isResizing, store.isPanning, dragStartPositions, initialMouseOffset, resizeHandle, resizeStartAnnotation, dragOffset, panStartTransform, store, screenToImage, render]);
+  }, [
+    store.isDragging,
+    store.isResizing,
+    store.isPanning,
+    dragStartPositions,
+    initialMouseOffset,
+    resizeHandle,
+    resizeStartAnnotation,
+    dragOffset,
+    panStartTransform,
+    store,
+    screenToImage,
+    render,
+    setPanPosition,
+    cancelPanAnimation,
+  ]);
 
   const handleMouseUp = useCallback(() => {
+    cancelPanAnimation();
     if (store.isDrawing && drawStart && store.image) {
       const start = screenToImage(drawStart.x, drawStart.y);
       const end = { x: store.mousePos.imageX, y: store.mousePos.imageY };
@@ -2742,7 +2839,7 @@ export const ImageAnnotator = () => {
     setResizeStartAnnotation(null);
     setMarqueeStart(null);
     setPanStartTransform(null);
-  }, [store, drawStart, screenToImage, imageToScreen, marqueeStart, isProfileLabel, selectedIdList]);
+  }, [store, drawStart, screenToImage, imageToScreen, marqueeStart, isProfileLabel, selectedIdList, cancelPanAnimation]);
 
   const handleWheel = useCallback((e: WheelEvent) => {
     // Only zoom when Shift is pressed, otherwise allow normal scrolling
@@ -2780,10 +2877,21 @@ export const ImageAnnotator = () => {
       }
 
       if (editingId) {
+        if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
+          e.preventDefault();
+          void commitPendingOcrEdits();
+          return;
+        }
         if (e.key === "Escape") {
           e.preventDefault();
           handleOverlayDismiss();
         }
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        void commitPendingOcrEdits();
         return;
       }
 
@@ -2879,7 +2987,7 @@ export const ImageAnnotator = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId]);
+  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingOcrEdits]);
 
   // Note: Annotations are now automatically saved when they're created/modified/deleted
   // They're loaded when an image is loaded via loadImageToCanvas
@@ -3658,6 +3766,11 @@ export const ImageAnnotator = () => {
                       }
                     }}
                     onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
+                        e.preventDefault();
+                        void commitPendingOcrEdits();
+                        return;
+                      }
                       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                         e.preventDefault();
                         void finalizeOcrTextEditing();
