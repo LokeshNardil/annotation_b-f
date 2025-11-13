@@ -153,11 +153,37 @@ const resolveOcrColor = (label?: string) => {
   return matched?.color ?? getNextColor();
 };
 
+const sanitizeIdSegment = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "-");
+
 const createAnnotationId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return `ocr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `ann-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+};
+
+const createStableAnnotationId = (params: {
+  category: "ocr" | "model" | "profile";
+  imageId: string;
+  classId?: string | number;
+  label?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  index: number;
+}) => {
+  const { category, imageId, classId, label, x, y, w, h, index } = params;
+  const parts = [
+    category,
+    sanitizeIdSegment(imageId || "image"),
+    sanitizeIdSegment(String(classId ?? label ?? index)),
+    Math.round(x),
+    Math.round(y),
+    Math.round(w),
+    Math.round(h),
+  ];
+  return parts.join("_");
 };
 
 const resolveModelLabel = (classId: string, meta?: DefaultAssetConfig) => {
@@ -309,8 +335,20 @@ export const convertBoundingBoxRowsToAnnotations = (
             return resolved;
           })();
 
+    const annotationId = createStableAnnotationId({
+      category,
+      imageId,
+      classId,
+      label,
+      x: xMin,
+      y: yMin,
+      w: width,
+      h: height,
+      index,
+    });
+
     const annotation: Annotation = {
-      id: createAnnotationId(),
+      id: annotationId,
       label,
       color: resolveCategoryColor(label, category),
       x: xMin,
@@ -1537,20 +1575,32 @@ export const ImageAnnotator = () => {
           const annotationLabel =
             (textValue && textValue.length > 0 ? textValue : labelCategory) ?? `OCR ${index + 1}`;
 
-          const annotation: Annotation = {
-            id: createAnnotationId(),
-            label: annotationLabel,
-            color: resolveOcrColor(labelCategory),
-            x,
-            y,
-            w: width,
-            h: height,
-            createdAt: now + index,
-            updatedAt: now + index,
-            parentId: imageId,
-            category: "ocr",
-            ocrLabel: labelCategory,
-          };
+        const annotationId = createStableAnnotationId({
+          category: "ocr",
+          imageId,
+          classId: row.id ?? row.annotation_id ?? row.label ?? index,
+          label: annotationLabel,
+          x,
+          y,
+          w: width,
+          h: height,
+          index,
+        });
+
+        const annotation: Annotation = {
+          id: annotationId,
+          label: annotationLabel,
+          color: resolveOcrColor(labelCategory),
+          x,
+          y,
+          w: width,
+          h: height,
+          createdAt: now + index,
+          updatedAt: now + index,
+          parentId: imageId,
+          category: "ocr",
+          ocrLabel: labelCategory,
+        };
 
           annotations.push(annotation);
         });
