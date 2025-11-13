@@ -223,6 +223,19 @@ const linkAnnotationsToProfiles = (annotations: Annotation[]): Annotation[] => {
   return changed ? updated : annotations;
 };
 
+const resolveAnnotationCategory = (annotation: Annotation): Annotation["category"] => {
+  if (annotation.category) {
+    return annotation.category;
+  }
+  if (annotation.ocrLabel || (annotation.label && OCR_LABEL_CONFIG.some((entry) => entry.name === annotation.label))) {
+    return "ocr";
+  }
+  if (annotation.label && isProfileLabelName(annotation.label)) {
+    return "profile";
+  }
+  return "model";
+};
+
 const resolveCategoryColor = (label: string, category: "model" | "profile") => {
   if (category === "profile") {
     return PROFILE_LABEL_CONFIG.find((entry) => entry.name === label)?.color ?? getNextColor();
@@ -360,6 +373,16 @@ export const ImageAnnotator = () => {
   const panPointerTypeRef = useRef<"mouse" | "touch" | "wheel" | "pen" | null>(null);
   const activeTouchPanIdRef = useRef<number | null>(null);
   const wheelPanTimeoutRef = useRef<number | null>(null);
+  const pendingModelEditsRef = useRef<Set<string>>(new Set());
+  const pendingProfileEditsRef = useRef<Set<string>>(new Set());
+  const previousAnnotationSnapshotRef = useRef<
+    Map<string, { updatedAt: number; category?: Annotation["category"] }>
+  >(new Map());
+  const annotationSnapshotInitializedRef = useRef(false);
+  const categorySaveUnsupportedRef = useRef<{ model: boolean; profile: boolean }>({
+    model: false,
+    profile: false,
+  });
 
   const reconcileAnnotationParents = useCallback(() => {
     useAnnotationStore.setState((state) => {
@@ -926,8 +949,22 @@ export const ImageAnnotator = () => {
         label: nextOption.name,
         color: nextOption.color,
       });
-      store.saveToLocalStorage?.();
-      toast.success(`Label updated to ${nextOption.name}`);
+
+      const updatedCategory = resolveAnnotationCategory({
+        ...annotation,
+        label: nextOption.name,
+        category: annotation.category,
+      });
+
+      if (updatedCategory === "profile") {
+        pendingProfileEditsRef.current.add(annotation.id);
+        toast.success?.("Profile change queued. Press Ctrl+S to write to CSV.");
+      } else if (updatedCategory === "model") {
+        pendingModelEditsRef.current.add(annotation.id);
+        toast.success?.("Model change queued. Press Ctrl+S to write to CSV.");
+      } else {
+        toast.success?.(`Label updated to ${nextOption.name}`);
+      }
     }
 
     clearEditingState();
@@ -989,25 +1026,27 @@ export const ImageAnnotator = () => {
     clearEditingState();
   }, [editingId, clearEditingState, store]);
 
-  const commitPendingOcrEdits = useCallback(async () => {
+  const commitPendingOcrEdits = useCallback(async (options?: { silentIfEmpty?: boolean }) => {
     if (editingId) {
       await finalizeOcrTextEditing({ skipToast: true });
     }
 
     if (pendingOcrEditsRef.current.size === 0) {
-      toast.info?.("No OCR edits to save.");
-      return;
+      if (!options?.silentIfEmpty) {
+        toast.info?.("No OCR edits to save.");
+      }
+      return false;
     }
 
     const currentImage = uploadedImages.find((entry) => entry.id === currentImageId) ?? null;
     if (!currentImage) {
       toast.error?.("No active image found; cannot save OCR edits.");
-      return;
+      return false;
     }
 
     if (!currentImage.ocrCsvPath) {
       toast.error?.("This image does not have an OCR CSV path configured.");
-      return;
+      return false;
     }
 
     const ocrAnnotations = store.annotations.filter((ann) => ann.category === "ocr" || Boolean(ann.ocrLabel));
@@ -1066,18 +1105,204 @@ export const ImageAnnotator = () => {
           lastError instanceof Error ? lastError.message : "Unknown error"
         }`,
       );
-      return;
+      return false;
     }
 
     pendingOcrEditsRef.current.clear();
     store.saveToLocalStorage?.();
     toast.success?.("OCR edits saved to CSV.");
+    return true;
   }, [
     currentImageId,
     editingId,
     finalizeOcrTextEditing,
     store,
     uploadedImages,
+  ]);
+
+  const commitPendingCategoryEdits = useCallback(
+    async (category: "model" | "profile", options?: { silentIfEmpty?: boolean }) => {
+      if (categorySaveUnsupportedRef.current[category]) {
+        if (!options?.silentIfEmpty) {
+          toast.error?.(
+            `${category === "model" ? "Model" : "Profile"} CSV saving is not available on the server.`,
+          );
+        }
+        return false;
+      }
+
+      const pendingRef = category === "model" ? pendingModelEditsRef : pendingProfileEditsRef;
+      const categoryLabel = category === "model" ? "Model" : "Profile";
+      const pendingCount = pendingRef.current.size;
+
+      if (pendingCount === 0) {
+        if (!options?.silentIfEmpty) {
+          toast.info?.(`No ${categoryLabel.toLowerCase()} edits to save.`);
+        }
+        return false;
+      }
+
+      const currentImage = uploadedImages.find((entry) => entry.id === currentImageId) ?? null;
+      if (!currentImage) {
+        toast.error?.(`No active image found; cannot save ${categoryLabel.toLowerCase()} edits.`);
+        return false;
+      }
+
+      const csvPathKey = category === "model" ? "modelCsvPath" : "profileCsvPath";
+      const csvPath = currentImage[csvPathKey as keyof UploadedImageEntry] as string | undefined;
+      if (!csvPath) {
+        toast.error?.(`This image does not have a ${categoryLabel.toLowerCase()} CSV path configured.`);
+        return false;
+      }
+
+      const relevantAnnotations = store.annotations.filter(
+        (ann) => resolveAnnotationCategory(ann) === category,
+      );
+
+      const payload = {
+        relative_csv_path: csvPath,
+        annotations: relevantAnnotations.map((ann) => {
+          const width = ann.w ?? 0;
+          const height = ann.h ?? 0;
+          const x = ann.x ?? 0;
+          const y = ann.y ?? 0;
+          const x2 = x + width;
+          const y2 = y + height;
+
+          return {
+            id: ann.id,
+            label: ann.label ?? "",
+            x,
+            y,
+            width,
+            height,
+            x_min: x,
+            y_min: y,
+            x_max: x2,
+            y_max: y2,
+            x1: x,
+            y1: y,
+            x2,
+            y2,
+            parent_id: ann.parentId ?? null,
+            color: ann.color,
+          };
+        }),
+      };
+
+      const primaryBase = resolveApiBaseUrl();
+      const fallbackBase = "http://127.0.0.1:8000";
+      const basesToTry =
+        primaryBase === fallbackBase ? [primaryBase] : [primaryBase, fallbackBase];
+
+      let persisted = false;
+      let lastError: unknown = null;
+
+      for (const apiBase of basesToTry) {
+        try {
+          console.log(`[${categoryLabel.toUpperCase()}] Saving pending edits to CSV`, {
+            apiBase,
+            csvPath,
+            pendingCount,
+            totalAnnotations: payload.annotations.length,
+          });
+          const response = await fetch(`${apiBase}/annotations/${category}/save`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            if (response.status === 404) {
+              categorySaveUnsupportedRef.current[category] = true;
+              toast.error?.(
+                `${categoryLabel} CSV saving is not supported by ${apiBase}. Please update the backend.`,
+              );
+              return false;
+            }
+            const message = await response.text();
+            throw new Error(message || response.statusText);
+          }
+          const result = await response.json();
+          console.log(`[${categoryLabel.toUpperCase()}] CSV persist successful`, result);
+          persisted = true;
+          break;
+        } catch (error) {
+          console.error(`[${categoryLabel.toUpperCase()}] Failed saving to ${apiBase}`, error);
+          lastError = error;
+        }
+      }
+
+      if (!persisted) {
+        toast.error?.(
+          `Failed to save ${categoryLabel.toLowerCase()} CSV: ${
+            lastError instanceof Error ? lastError.message : "Unknown error"
+          }`,
+        );
+        return false;
+      }
+
+      pendingRef.current.clear();
+      store.saveToLocalStorage?.();
+      toast.success?.(`${categoryLabel} edits saved to CSV.`);
+      return true;
+    },
+    [currentImageId, store, uploadedImages],
+  );
+
+  const commitPendingModelEdits = useCallback(
+    (options?: { silentIfEmpty?: boolean }) => commitPendingCategoryEdits("model", options),
+    [commitPendingCategoryEdits],
+  );
+
+  const commitPendingProfileEdits = useCallback(
+    (options?: { silentIfEmpty?: boolean }) => commitPendingCategoryEdits("profile", options),
+    [commitPendingCategoryEdits],
+  );
+
+  const commitPendingEdits = useCallback(async () => {
+    let handledEditingSession = false;
+    if (editingId) {
+      const activeAnnotation = store.annotations.find((ann) => ann.id === editingId) ?? null;
+      if (activeAnnotation) {
+        const category = resolveAnnotationCategory(activeAnnotation);
+        if (category === "ocr") {
+          await finalizeOcrTextEditing({ skipToast: true });
+        } else {
+          const targetValue = editingValue || initialEditingValueRef.current || "";
+          finalizeEditing(targetValue);
+        }
+      } else {
+        clearEditingState();
+      }
+      handledEditingSession = true;
+    }
+
+    const hadOcr = pendingOcrEditsRef.current.size > 0;
+    const hadModel = pendingModelEditsRef.current.size > 0;
+    const hadProfile = pendingProfileEditsRef.current.size > 0;
+
+    const [ocrSaved, modelSaved, profileSaved] = await Promise.all([
+      commitPendingOcrEdits({ silentIfEmpty: true }),
+      commitPendingModelEdits({ silentIfEmpty: true }),
+      commitPendingProfileEdits({ silentIfEmpty: true }),
+    ]);
+
+      if (!hadOcr && !hadModel && !hadProfile && !handledEditingSession) {
+        toast.info?.("No edits to save.");
+    }
+
+    return Boolean(ocrSaved || modelSaved || profileSaved);
+  }, [
+    editingId,
+    store.annotations,
+    finalizeOcrTextEditing,
+    editingValue,
+    finalizeEditing,
+    initialEditingValueRef,
+    clearEditingState,
+    commitPendingOcrEdits,
+    commitPendingModelEdits,
+    commitPendingProfileEdits,
   ]);
 
   const handleOverlayDismiss = useCallback(() => {
@@ -2196,6 +2421,46 @@ export const ImageAnnotator = () => {
     [],
   );
 
+  useEffect(() => {
+    const previousSnapshot = previousAnnotationSnapshotRef.current;
+    const wasInitialized = annotationSnapshotInitializedRef.current;
+    const nextSnapshot = new Map<string, { updatedAt: number; category?: Annotation["category"] }>();
+    const seenIds = new Set<string>();
+
+    for (const annotation of store.annotations) {
+      const updatedAt = Number.isFinite(annotation.updatedAt) ? annotation.updatedAt ?? 0 : 0;
+      const category = resolveAnnotationCategory(annotation);
+      nextSnapshot.set(annotation.id, { updatedAt, category });
+      seenIds.add(annotation.id);
+
+      if (wasInitialized) {
+        const previousEntry = previousSnapshot.get(annotation.id);
+        if (!previousEntry || previousEntry.updatedAt !== updatedAt || previousEntry.category !== category) {
+          if (category === "model") {
+            pendingModelEditsRef.current.add(annotation.id);
+          } else if (category === "profile") {
+            pendingProfileEditsRef.current.add(annotation.id);
+          }
+        }
+      }
+    }
+
+    if (wasInitialized) {
+      for (const [id, previousEntry] of previousSnapshot.entries()) {
+        if (!seenIds.has(id)) {
+          if (previousEntry.category === "model") {
+            pendingModelEditsRef.current.add(id);
+          } else if (previousEntry.category === "profile") {
+            pendingProfileEditsRef.current.add(id);
+          }
+        }
+      }
+    }
+
+    previousAnnotationSnapshotRef.current = nextSnapshot;
+    annotationSnapshotInitializedRef.current = true;
+  }, [store.annotations]);
+
   const resetInteractionState = useCallback(() => {
     cancelPanAnimation();
     if (wheelPanTimeoutRef.current !== null) {
@@ -3085,7 +3350,7 @@ export const ImageAnnotator = () => {
       if (editingId) {
         if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
           e.preventDefault();
-          void commitPendingOcrEdits();
+          void commitPendingEdits();
           return;
         }
         if (e.key === "Escape") {
@@ -3097,7 +3362,7 @@ export const ImageAnnotator = () => {
 
       if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
-        void commitPendingOcrEdits();
+        void commitPendingEdits();
         return;
       }
 
@@ -3190,7 +3455,7 @@ export const ImageAnnotator = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingOcrEdits, resetInteractionState]);
+  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingEdits, resetInteractionState]);
 
   // Note: Annotations are now automatically saved when they're created/modified/deleted
   // They're loaded when an image is loaded via loadImageToCanvas
@@ -3976,7 +4241,7 @@ export const ImageAnnotator = () => {
                     onKeyDown={(e) => {
                       if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
                         e.preventDefault();
-                        void commitPendingOcrEdits();
+                        void commitPendingEdits();
                         return;
                       }
                       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
