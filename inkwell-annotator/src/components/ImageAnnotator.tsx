@@ -357,6 +357,9 @@ export const ImageAnnotator = () => {
   const panTargetRef = useRef<{ x: number; y: number } | null>(null);
   const panAnimationFrameRef = useRef<number | null>(null);
   const pendingOcrEditsRef = useRef<Map<string, string>>(new Map());
+  const panPointerTypeRef = useRef<"mouse" | "touch" | "wheel" | "pen" | null>(null);
+  const activeTouchPanIdRef = useRef<number | null>(null);
+  const wheelPanTimeoutRef = useRef<number | null>(null);
 
   const reconcileAnnotationParents = useCallback(() => {
     useAnnotationStore.setState((state) => {
@@ -381,15 +384,21 @@ export const ImageAnnotator = () => {
       const smooth = options?.smooth ?? true;
       const state = useAnnotationStore.getState();
       const currentScale = state.transform.scale;
+      const snappedTargetX = Math.round(targetX);
+      const snappedTargetY = Math.round(targetY);
 
       if (!smooth) {
         cancelPanAnimation();
-        state.setTransform({ scale: currentScale, translateX: targetX, translateY: targetY });
+        state.setTransform({
+          scale: currentScale,
+          translateX: snappedTargetX,
+          translateY: snappedTargetY,
+        });
         renderRef.current?.();
         return;
       }
 
-      panTargetRef.current = { x: targetX, y: targetY };
+      panTargetRef.current = { x: snappedTargetX, y: snappedTargetY };
 
       if (panAnimationFrameRef.current !== null) {
         return;
@@ -406,13 +415,34 @@ export const ImageAnnotator = () => {
         const { translateX, translateY } = latestState.transform;
 
         const easing = 0.28;
-        const nextX = translateX + (target.x - translateX) * easing;
-        const nextY = translateY + (target.y - translateY) * easing;
+        const remainingX = target.x - translateX;
+        const remainingY = target.y - translateY;
 
-        const reachedX = Math.abs(target.x - translateX) < 0.4;
-        const reachedY = Math.abs(target.y - translateY) < 0.4;
+        if (Math.abs(remainingX) <= 1 && Math.abs(remainingY) <= 1) {
+          latestState.setTransform({
+            translateX: target.x,
+            translateY: target.y,
+          });
+          renderRef.current?.();
+          panAnimationFrameRef.current = null;
+          panTargetRef.current = null;
+          return;
+        }
 
-        if (reachedX && reachedY) {
+        const nextX = translateX + remainingX * easing;
+        const nextY = translateY + remainingY * easing;
+
+        let snappedNextX = Math.round(nextX);
+        let snappedNextY = Math.round(nextY);
+
+        if (snappedNextX === translateX && Math.abs(remainingX) >= 1) {
+          snappedNextX = translateX + Math.sign(remainingX);
+        }
+        if (snappedNextY === translateY && Math.abs(remainingY) >= 1) {
+          snappedNextY = translateY + Math.sign(remainingY);
+        }
+
+        if (target.x === snappedNextX && target.y === snappedNextY) {
           latestState.setTransform({
             translateX: target.x,
             translateY: target.y,
@@ -424,8 +454,8 @@ export const ImageAnnotator = () => {
         }
 
         latestState.setTransform({
-          translateX: nextX,
-          translateY: nextY,
+          translateX: snappedNextX,
+          translateY: snappedNextY,
         });
         renderRef.current?.();
         panAnimationFrameRef.current = requestAnimationFrame(step);
@@ -671,16 +701,20 @@ export const ImageAnnotator = () => {
     const canvasX = screenX + scrollLeft;
     const canvasY = screenY + scrollTop;
     // Convert canvas coordinates to image coordinates
-    const x = (canvasX - transform.translateX) / transform.scale;
-    const y = (canvasY - transform.translateY) / transform.scale;
+    const translateX = Math.round(transform.translateX);
+    const translateY = Math.round(transform.translateY);
+    const x = (canvasX - translateX) / transform.scale;
+    const y = (canvasY - translateY) / transform.scale;
     return { x, y };
   }, [store.transform]);
 
   const imageToScreen = useCallback((imageX: number, imageY: number) => {
     const { transform } = store;
     // Convert image coordinates to canvas coordinates
-    const canvasX = imageX * transform.scale + transform.translateX;
-    const canvasY = imageY * transform.scale + transform.translateY;
+    const translateX = Math.round(transform.translateX);
+    const translateY = Math.round(transform.translateY);
+    const canvasX = imageX * transform.scale + translateX;
+    const canvasY = imageY * transform.scale + translateY;
     // Subtract scroll offset to get position in visible area
     const scrollLeft = scrollContainerRef.current?.scrollLeft || 0;
     const scrollTop = scrollContainerRef.current?.scrollTop || 0;
@@ -1861,8 +1895,10 @@ export const ImageAnnotator = () => {
     // When the scroll container scrolls, we see a different part of the wrapper
     // To draw on canvas (which is at viewport position): adjust for scroll offset
     // Canvas viewport = wrapper position - scroll position
-    const adjustedTranslateX = transform.translateX - scrollLeft;
-    const adjustedTranslateY = transform.translateY - scrollTop;
+    const roundedTranslateX = Math.round(transform.translateX);
+    const roundedTranslateY = Math.round(transform.translateY);
+    const adjustedTranslateX = roundedTranslateX - scrollLeft;
+    const adjustedTranslateY = roundedTranslateY - scrollTop;
 
     // Clip to canvas area (which covers wrapper) to ensure we draw within bounds
     // This prevents drawing outside the canvas but allows covering the full wrapper
@@ -2150,6 +2186,43 @@ export const ImageAnnotator = () => {
 
   useEffect(() => () => cancelPanAnimation(), [cancelPanAnimation]);
 
+  useEffect(
+    () => () => {
+      if (wheelPanTimeoutRef.current !== null) {
+        clearTimeout(wheelPanTimeoutRef.current);
+        wheelPanTimeoutRef.current = null;
+      }
+    },
+    [],
+  );
+
+  const resetInteractionState = useCallback(() => {
+    cancelPanAnimation();
+    if (wheelPanTimeoutRef.current !== null) {
+      clearTimeout(wheelPanTimeoutRef.current);
+      wheelPanTimeoutRef.current = null;
+    }
+    panPointerTypeRef.current = null;
+    activeTouchPanIdRef.current = null;
+    store.setDrawing(false);
+    store.setPanning(false);
+    store.setDragging(false);
+    store.setResizing(false);
+    setDrawStart(null);
+    setDragOffset(null);
+    setDragStartPositions(new Map());
+    setInitialMouseOffset(null);
+    setResizeHandle(null);
+    setResizeStartAnnotation(null);
+    setMarqueeStart(null);
+    setPanStartTransform(null);
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const defaultCursor = store.currentTool === "rectangle" ? "crosshair" : "grab";
+      canvas.style.cursor = defaultCursor;
+    }
+  }, [cancelPanAnimation, store]);
+
   const sendCursorIfNeeded = useCallback(
     (imageX: number, imageY: number) => {
       if (!realtimeEnabled) return;
@@ -2175,6 +2248,7 @@ export const ImageAnnotator = () => {
 
     // Pan with space or middle mouse (Revu-style panning)
     if (e.button === 1 || (e.button === 0 && e.nativeEvent.getModifierState?.("Space"))) {
+      e.preventDefault();
       store.setPanning(true);
       cancelPanAnimation();
       // Store initial mouse position and initial transform for smooth panning
@@ -2183,6 +2257,10 @@ export const ImageAnnotator = () => {
         translateX: store.transform.translateX, 
         translateY: store.transform.translateY 
       });
+      panPointerTypeRef.current = "mouse";
+      if (canvas) {
+        canvas.style.cursor = "grabbing";
+      }
       return;
     }
 
@@ -2362,6 +2440,105 @@ export const ImageAnnotator = () => {
     }
   }, [store, screenToImage, hitTestAnnotation, hitTestHandle, openLabelEditor, openTextEditor, isProfileLabel, selectedIdList, sendCursorIfNeeded, cancelPanAnimation]);
 
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType !== "touch" && e.pointerType !== "pen") {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas || !store.image) return;
+
+    e.preventDefault();
+    cancelPanAnimation();
+    store.setPanning(true);
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    setDragOffset({ x, y });
+    setPanStartTransform({
+      translateX: store.transform.translateX,
+      translateY: store.transform.translateY,
+    });
+    panPointerTypeRef.current = e.pointerType === "pen" ? "pen" : "touch";
+    activeTouchPanIdRef.current = e.pointerId;
+
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      // Ignore capture errors (e.g., unsupported browsers)
+    }
+
+    canvas.style.cursor = "grabbing";
+  }, [store, cancelPanAnimation]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType !== "touch" && e.pointerType !== "pen") {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const imagePos = screenToImage(x, y);
+
+    store.setMousePos({ x, y, imageX: imagePos.x, imageY: imagePos.y });
+    sendCursorIfNeeded(imagePos.x, imagePos.y);
+
+    if (!store.isPanning || activeTouchPanIdRef.current !== e.pointerId) {
+      return;
+    }
+
+    if (!dragOffset || !panStartTransform) return;
+
+    e.preventDefault();
+    const dx = x - dragOffset.x;
+    const dy = y - dragOffset.y;
+    setPanPosition(panStartTransform.translateX + dx, panStartTransform.translateY + dy, {
+      smooth: false,
+    });
+  }, [store, screenToImage, sendCursorIfNeeded, dragOffset, panStartTransform, setPanPosition]);
+
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if ((e.pointerType !== "touch" && e.pointerType !== "pen") || activeTouchPanIdRef.current !== e.pointerId) {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (canvas && canvas.hasPointerCapture(e.pointerId)) {
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch {
+        // Ignore release errors
+      }
+    }
+
+    resetInteractionState();
+  }, [resetInteractionState]);
+
+  const handlePointerCancel = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if ((e.pointerType !== "touch" && e.pointerType !== "pen") || activeTouchPanIdRef.current !== e.pointerId) {
+      return;
+    }
+    resetInteractionState();
+  }, [resetInteractionState]);
+
+  const handleMouseEnter = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (store.isPanning) {
+      canvas.style.cursor = "grabbing";
+    } else if (store.currentTool === "rectangle") {
+      canvas.style.cursor = "crosshair";
+    } else {
+      canvas.style.cursor = "grab";
+    }
+  }, [store.isPanning, store.currentTool]);
+
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -2495,7 +2672,7 @@ export const ImageAnnotator = () => {
     if (store.isPanning) {
       if (canvas) canvas.style.cursor = "grabbing";
     } else if (store.currentTool === "select") {
-      let cursor = "default";
+      let cursor = "grab";
       const selected = store.annotations.filter((a) => selectedIdSet.has(a.id));
       
       for (const ann of selected) {
@@ -2516,7 +2693,7 @@ export const ImageAnnotator = () => {
         }
       }
       
-      if (cursor === "default") {
+      if (cursor === "grab") {
         for (const ann of store.annotations) {
           if (hitTestAnnotation(imagePos.x, imagePos.y, ann)) {
             cursor = "move";
@@ -2528,6 +2705,8 @@ export const ImageAnnotator = () => {
       if (canvas) canvas.style.cursor = cursor;
     } else if (store.currentTool === "rectangle") {
       if (canvas) canvas.style.cursor = "crosshair";
+    } else if (canvas) {
+      canvas.style.cursor = "grab";
     }
   }, [
     store,
@@ -2669,16 +2848,7 @@ export const ImageAnnotator = () => {
     };
 
     const handleGlobalMouseUp = () => {
-      store.setDragging(false);
-      store.setResizing(false);
-      store.setPanning(false);
-      cancelPanAnimation();
-      setDragOffset(null);
-      setDragStartPositions(new Map());
-      setInitialMouseOffset(null);
-      setResizeHandle(null);
-      setResizeStartAnnotation(null);
-      setPanStartTransform(null);
+      resetInteractionState();
     };
 
     if (store.isDragging || store.isResizing || store.isPanning) {
@@ -2704,7 +2874,7 @@ export const ImageAnnotator = () => {
     screenToImage,
     render,
     setPanPosition,
-    cancelPanAnimation,
+    resetInteractionState,
   ]);
 
   const handleMouseUp = useCallback(() => {
@@ -2827,34 +2997,70 @@ export const ImageAnnotator = () => {
       }
     }
 
-    store.setDrawing(false);
-    store.setPanning(false);
-    store.setDragging(false);
-    store.setResizing(false);
-    setDrawStart(null);
-    setDragOffset(null);
-    setDragStartPositions(new Map());
-    setInitialMouseOffset(null);
-    setResizeHandle(null);
-    setResizeStartAnnotation(null);
-    setMarqueeStart(null);
-    setPanStartTransform(null);
-  }, [store, drawStart, screenToImage, imageToScreen, marqueeStart, isProfileLabel, selectedIdList, cancelPanAnimation]);
+    resetInteractionState();
+  }, [store, drawStart, screenToImage, imageToScreen, marqueeStart, isProfileLabel, selectedIdList, cancelPanAnimation, resetInteractionState]);
 
   const handleWheel = useCallback((e: WheelEvent) => {
-    // Only zoom when Shift is pressed, otherwise allow normal scrolling
-    if (!e.shiftKey) {
-      return; // Allow normal scrolling when Shift is not pressed
+    const canvas = canvasRef.current;
+    if (!canvas || !store.image) {
+      return;
     }
-    
-    // Prevent default and zoom when Shift is pressed
+
+    if (e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      zoomAt(e.clientX, e.clientY, -delta);
+      return;
+    }
+
+    if (e.ctrlKey || e.metaKey) {
+      return;
+    }
+
     e.preventDefault();
     e.stopPropagation();
-    
-    // Use deltaY for vertical scroll, or deltaX for horizontal scroll (when Shift is pressed)
-    const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-    zoomAt(e.clientX, e.clientY, -delta);
-  }, [zoomAt]);
+
+    const { translateX, translateY } = store.transform;
+    const unit =
+      e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? canvas.clientHeight
+          : 1;
+    const deltaX = e.deltaX * unit;
+    const deltaY = e.deltaY * unit;
+
+    if (!store.isPanning) {
+      store.setPanning(true);
+    }
+
+    panPointerTypeRef.current = "wheel";
+    canvas.style.cursor = "grabbing";
+
+    if (wheelPanTimeoutRef.current !== null) {
+      clearTimeout(wheelPanTimeoutRef.current);
+    }
+
+    wheelPanTimeoutRef.current = window.setTimeout(() => {
+      const latest = useAnnotationStore.getState();
+      if (panPointerTypeRef.current === "wheel") {
+        latest.setPanning(false);
+        panPointerTypeRef.current = null;
+        const canvasElement = canvasRef.current;
+        if (canvasElement) {
+          const defaultCursor = latest.currentTool === "rectangle" ? "crosshair" : "grab";
+          canvasElement.style.cursor = defaultCursor;
+        }
+      }
+      if (wheelPanTimeoutRef.current !== null) {
+        clearTimeout(wheelPanTimeoutRef.current);
+        wheelPanTimeoutRef.current = null;
+      }
+    }, 160);
+
+    setPanPosition(translateX - deltaX, translateY - deltaY, { smooth: false });
+  }, [store, zoomAt, setPanPosition]);
 
   // Add wheel event listener with passive: false to allow preventDefault
   useEffect(() => {
@@ -2973,21 +3179,18 @@ export const ImageAnnotator = () => {
 
       // Cancel
       else if (normalizedKey === "Escape") {
+        e.preventDefault();
         if (store.mode === "viewport" && activeProfileEditId) {
-          e.preventDefault();
           setActiveProfileEditId(null);
-          store.clearSelection();
-        } else {
-          store.clearSelection();
-          store.setDrawing(false);
-          setDrawStart(null);
         }
+        store.clearSelection();
+        resetInteractionState();
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingOcrEdits]);
+  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingOcrEdits, resetInteractionState]);
 
   // Note: Annotations are now automatically saved when they're created/modified/deleted
   // They're loaded when an image is loaded via loadImageToCanvas
@@ -3636,20 +3839,25 @@ export const ImageAnnotator = () => {
                 >
               <canvas
                 ref={canvasRef}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      display: 'block',
-                      pointerEvents: 'auto',
-                      boxSizing: 'border-box',
-                      margin: 0,
-                      padding: 0,
-                      border: 'none',
-                      outline: 'none',
-                    }}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  display: 'block',
+                  pointerEvents: 'auto',
+                  boxSizing: 'border-box',
+                  margin: 0,
+                  padding: 0,
+                  border: 'none',
+                  outline: 'none',
+                }}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerCancel}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
+                onMouseEnter={handleMouseEnter}
                 onMouseUp={handleMouseUp}
                 onMouseLeave={handleMouseUp}
                 onContextMenu={(e) => e.preventDefault()}
