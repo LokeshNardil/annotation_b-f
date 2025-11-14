@@ -26,7 +26,7 @@ const MODE_COPY: Record<
 > = {
   viewport: {
     title: "Profile Legends",
-    description: "Available viewport/profile regions",
+    description: "Select a profile on the canvas to view its legend",
     accent: "🖼️",
   },
   model: {
@@ -97,7 +97,7 @@ export const LegendPanel = ({ items, mode, activeItemId, onSelect }: LegendPanel
 
           {items.length === 0 && (
             <div className="px-3 py-6 text-xs text-muted-foreground text-center rounded-md border border-dashed border-border/60 bg-muted/20">
-              No legends available for this mode
+              {mode === "viewport" ? "Select a profile to view its legend details" : "No legends available for this mode"}
             </div>
           )}
         </div>

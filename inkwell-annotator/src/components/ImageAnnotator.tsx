@@ -162,6 +162,33 @@ const createAnnotationId = () => {
   return `ann-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 };
 
+const stableUuidFromSeed = (seed: string) => {
+  const toHex = (value: number) => value.toString(16).padStart(8, "0");
+  const hashWithSeed = (input: string, seedValue: number) => {
+    let hash = seedValue >>> 0;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash >>> 0;
+  };
+
+  const h1 = hashWithSeed(seed, 0x811c9dc5);
+  const h2 = hashWithSeed(seed + "#" + h1.toString(16), 0x811c9dc5 ^ h1);
+  const h3 = hashWithSeed(seed + "#" + h2.toString(16), 0x811c9dc5 ^ h2);
+  const h4 = hashWithSeed(seed + "#" + h3.toString(16), 0x811c9dc5 ^ h3);
+
+  const timeLow = toHex(h1);
+  const timeMid = toHex(h2).slice(0, 4);
+  const timeHiAndVersion = ((h2 >>> 16) & 0x0fff) | 0x4000;
+  const clockSeq = ((h3 >>> 16) & 0x3fff) | 0x8000;
+  const node = `${toHex(h3).slice(0, 4)}${toHex(h4).slice(0, 8)}`;
+
+  return `${timeLow}-${timeMid}-${timeHiAndVersion.toString(16).padStart(4, "0")}-${clockSeq
+    .toString(16)
+    .padStart(4, "0")}-${node.slice(0, 12)}`;
+};
+
 const createStableAnnotationId = (params: {
   category: "ocr" | "model" | "profile";
   imageId: string;
@@ -183,7 +210,7 @@ const createStableAnnotationId = (params: {
     Math.round(w),
     Math.round(h),
   ];
-  return parts.join("_");
+  return stableUuidFromSeed(parts.join("|"));
 };
 
 const resolveModelLabel = (classId: string, meta?: DefaultAssetConfig) => {
@@ -398,6 +425,9 @@ export const ImageAnnotator = () => {
   const initialEditingValueRef = useRef<string | null>(null);
   const [activeProfileEditId, setActiveProfileEditId] = useState<string | null>(null);
   const [isUploadsHydrated, setIsUploadsHydrated] = useState(false);
+  const [overlappingAnnotations, setOverlappingAnnotations] = useState<Annotation[]>([]);
+  const [overlappingIndex, setOverlappingIndex] = useState(0);
+  const lastClickPositionRef = useRef<{ x: number; y: number } | null>(null);
   const autoLoadedDefaultsRef = useRef<Set<string>>(new Set());
   const defaultAssetMeta = useMemo(
     () => new Map(DEFAULT_ASSET_UPLOADS.map((entry) => [entry.id, entry])),
@@ -731,10 +761,78 @@ export const ImageAnnotator = () => {
   const { sendCursorUpdate, sendSelectionUpdate, localUserId } = useRealtimeSync(
     realtimeEnabled ? realtimeAuth.projectId : null,
     realtimeEnabled ? realtimeAuth.token : null,
+    { imageId: currentImageId },
   );
 
   const store = useAnnotationStore();
-  const legendItems = store.getCurrentLabels();
+  const storeMode = store.mode;
+  const storeAnnotations = store.annotations;
+  const storeActiveLabel = store.activeLabel;
+  const storeGetCurrentLabels = store.getCurrentLabels;
+  const storeSetActiveLabel = store.setActiveLabel;
+
+  const selectedProfileAnnotations = useMemo(() => {
+    if (storeMode !== "viewport") {
+      return [] as Annotation[];
+    }
+
+    const profileIds = activeProfileEditId
+      ? [activeProfileEditId]
+      : selectedIdList.filter((id) => {
+          const ann = storeAnnotations.find((a) => a.id === id);
+          if (!ann) return false;
+          return isProfileLabelName(ann.label);
+        });
+
+    const uniqueProfileIds = Array.from(new Set(profileIds));
+    return uniqueProfileIds
+      .map((id) => storeAnnotations.find((ann) => ann.id === id))
+      .filter((ann): ann is Annotation => Boolean(ann && isProfileLabelName(ann.label)));
+  }, [storeMode, activeProfileEditId, selectedIdList, storeAnnotations]);
+
+  const profileLegendItems = useMemo(() => {
+    if (storeMode !== "viewport") {
+      return null;
+    }
+
+    if (selectedProfileAnnotations.length === 0) {
+      return null;
+    }
+
+    const legends = selectedProfileAnnotations.flatMap((profileAnn) => {
+      const config = PROFILE_LABEL_CONFIG.find((entry) => entry.name === profileAnn.label);
+      if (!config?.legends?.length) {
+        return [];
+      }
+
+      return config.legends.map((legend) => ({
+        ...legend,
+        id: `${profileAnn.id}-${legend.id}`,
+      }));
+    });
+
+    return legends;
+  }, [storeMode, selectedProfileAnnotations]);
+
+  const legendConfig = useMemo(() => {
+    if (profileLegendItems !== null) {
+      return {
+        items: profileLegendItems,
+        activeItemId: undefined as string | undefined,
+        onSelect: undefined as ((id: string) => void) | undefined,
+      };
+    }
+
+    return {
+      items: storeGetCurrentLabels(),
+      activeItemId: storeActiveLabel,
+      onSelect: storeSetActiveLabel,
+    };
+  }, [profileLegendItems, storeGetCurrentLabels, storeActiveLabel, storeSetActiveLabel]);
+
+  const legendItems = legendConfig.items;
+  const legendActiveItemId = legendConfig.activeItemId;
+  const legendOnSelect = legendConfig.onSelect;
 
   useEffect(() => {
     if (!realtimeEnabled) return;
@@ -743,10 +841,6 @@ export const ImageAnnotator = () => {
     lastSelectionIdRef.current = nextSelection;
     sendSelectionUpdate(nextSelection);
   }, [selectedIdList, sendSelectionUpdate, realtimeEnabled]);
-  const isProfileLabel = useCallback((label?: string) => {
-    if (!label) return false;
-    return PROFILE_LABEL_CONFIG.some((profileLabel) => profileLabel.name === label);
-  }, []);
   const isProfileEditMode = activeProfileEditId !== null;
   
   const MIN_ZOOM = 0.05;
@@ -2546,6 +2640,12 @@ export const ImageAnnotator = () => {
       if (now - lastCursorSentRef.current < 50) return;
       lastCursorSentRef.current = now;
 
+      console.debug("[Realtime][Debug] Preparing to send cursor update", {
+        imageX,
+        imageY,
+        translate: store.transform,
+        currentImageId,
+      });
       sendCursorUpdate({ imageX, imageY });
     },
     [realtimeEnabled, sendCursorUpdate]
@@ -2601,8 +2701,8 @@ export const ImageAnnotator = () => {
       }
 
       // Check annotation hit - prioritize Profile rectangles in Profile mode
-      // First, check Profile rectangles, then check Model/OCR annotations
-      let clickedAnnotation: Annotation | null = null;
+      // Find ALL overlapping annotations and prioritize smaller ones
+      let allOverlapping: Annotation[] = [];
       
       if (store.mode === "viewport") {
         if (!isProfileEditMode) {
@@ -2611,61 +2711,100 @@ export const ImageAnnotator = () => {
             const ann = store.annotations[i];
             const isProfile = PROFILE_LABEL_CONFIG.some(label => label.name === ann.label);
             if (isProfile && hitTestAnnotation(imagePos.x, imagePos.y, ann)) {
-              clickedAnnotation = ann;
-              break;
+              allOverlapping.push(ann);
             }
           }
         }
 
-        // Second pass: Check Model/OCR annotations if no Profile was clicked
-        if (!clickedAnnotation) {
-          const selectedProfileIds = activeProfileEditId
-            ? [activeProfileEditId]
-            : selectedIdList.filter(id => {
-                const p = store.annotations.find(a => a.id === id);
-                return p && PROFILE_LABEL_CONFIG.some(label => label.name === p.label);
-              });
+        // Second pass: Check Model/OCR annotations
+        const selectedProfileIds = activeProfileEditId
+          ? [activeProfileEditId]
+          : selectedIdList.filter(id => {
+              const p = store.annotations.find(a => a.id === id);
+              return p && PROFILE_LABEL_CONFIG.some(label => label.name === p.label);
+            });
+        
+        for (let i = store.annotations.length - 1; i >= 0; i--) {
+          const ann = store.annotations[i];
+          const isProfile = PROFILE_LABEL_CONFIG.some(label => label.name === ann.label);
+          if (isProfile) continue; // Skip Profile rectangles (already checked or hidden)
           
-          for (let i = store.annotations.length - 1; i >= 0; i--) {
-            const ann = store.annotations[i];
-            const isProfile = PROFILE_LABEL_CONFIG.some(label => label.name === ann.label);
-            if (isProfile) continue; // Skip Profile rectangles (already checked or hidden)
-            
-            // Only check Model/OCR if they're inside a selected Profile
-            const isInsideSelectedProfile = selectedProfileIds.length > 0 && (
-              (ann.parentId && selectedProfileIds.includes(ann.parentId)) ||
-              selectedProfileIds.some(profileId => {
-                const profileAnn = store.annotations.find(a => a.id === profileId);
-                if (!profileAnn) return false;
-                return isRectInside(ann, profileAnn);
-              })
-            );
-            
-            if (isInsideSelectedProfile && hitTestAnnotation(imagePos.x, imagePos.y, ann)) {
-              clickedAnnotation = ann;
-              break;
-            }
+          // Only check Model/OCR if they're inside a selected Profile
+          const isInsideSelectedProfile = selectedProfileIds.length > 0 && (
+            (ann.parentId && selectedProfileIds.includes(ann.parentId)) ||
+            selectedProfileIds.some(profileId => {
+              const profileAnn = store.annotations.find(a => a.id === profileId);
+              if (!profileAnn) return false;
+              return isRectInside(ann, profileAnn);
+            })
+          );
+          
+          if (isInsideSelectedProfile && hitTestAnnotation(imagePos.x, imagePos.y, ann)) {
+            allOverlapping.push(ann);
           }
         }
       } else {
-        // In Model/OCR mode, check all annotations normally
+        // In Model/OCR mode, check all annotations
         for (let i = store.annotations.length - 1; i >= 0; i--) {
           const ann = store.annotations[i];
           if (hitTestAnnotation(imagePos.x, imagePos.y, ann)) {
-            clickedAnnotation = ann;
-            break;
+            allOverlapping.push(ann);
           }
         }
+      }
+
+      // Sort by area (smallest first) - smaller annotations are usually more specific
+      allOverlapping.sort((a, b) => {
+        const areaA = a.w * a.h;
+        const areaB = b.w * b.h;
+        return areaA - areaB;
+      });
+
+      // Check if we're clicking at the same position (for cycling)
+      const isSameClickPosition = lastClickPositionRef.current &&
+        Math.abs(lastClickPositionRef.current.x - imagePos.x) < 5 &&
+        Math.abs(lastClickPositionRef.current.y - imagePos.y) < 5;
+
+      let clickedAnnotation: Annotation | null = null;
+      
+      if (allOverlapping.length > 0) {
+        if (isSameClickPosition && overlappingAnnotations.length > 0 && 
+            overlappingAnnotations.length === allOverlapping.length &&
+            overlappingAnnotations.every((ann, idx) => ann.id === allOverlapping[idx]?.id)) {
+          // Same position and same overlapping set - cycle through
+          const nextIndex = (overlappingIndex + 1) % overlappingAnnotations.length;
+          setOverlappingIndex(nextIndex);
+          clickedAnnotation = overlappingAnnotations[nextIndex];
+        } else {
+          // New click position or different overlapping set - start from smallest
+          setOverlappingAnnotations(allOverlapping);
+          setOverlappingIndex(0);
+          lastClickPositionRef.current = { x: imagePos.x, y: imagePos.y };
+          clickedAnnotation = allOverlapping[0];
+          
+          // Show notification if multiple overlapping annotations
+          if (allOverlapping.length > 1) {
+            toast.info(
+              `Multiple annotations found. Selected smallest (${allOverlapping[0].label || "Annotation"}). Press Tab to cycle through.`,
+              { duration: 2000 }
+            );
+          }
+        }
+      } else {
+        // No overlapping annotations - clear state
+        setOverlappingAnnotations([]);
+        setOverlappingIndex(0);
+        lastClickPositionRef.current = null;
       }
 
       if (clickedAnnotation) {
         const ann = clickedAnnotation;
 
-        if (store.mode === "viewport" && isProfileLabel(ann.label)) {
+        if (store.mode === "viewport" && isProfileLabelName(ann.label)) {
           store.loadAnnotationsForProfile(ann);
         }
 
-        if (store.mode === "viewport" && e.ctrlKey && isProfileLabel(ann.label)) {
+        if (store.mode === "viewport" && e.ctrlKey && isProfileLabelName(ann.label)) {
           setActiveProfileEditId(ann.id);
           if (!selectedIdSet.has(ann.id)) {
             store.setSelected([ann.id]);
@@ -2692,7 +2831,7 @@ export const ImageAnnotator = () => {
         }
 
         if (e.shiftKey) {
-          if (store.mode === "viewport" && isProfileLabel(ann.label)) {
+          if (store.mode === "viewport" && isProfileLabelName(ann.label)) {
             store.setSelected([ann.id]);
           } else {
             store.toggleSelected(ann.id);
@@ -2701,7 +2840,7 @@ export const ImageAnnotator = () => {
           // In Profile mode, clicking a Profile rectangle should activate it
           // Clear other Profile selections first if clicking a Profile rectangle
           if (store.mode === "viewport") {
-            const isProfile = isProfileLabel(ann.label);
+            const isProfile = isProfileLabelName(ann.label);
             if (isProfile) {
               // Clear all selections, then select only this Profile rectangle
               store.setSelected([ann.id]);
@@ -2753,7 +2892,7 @@ export const ImageAnnotator = () => {
       }
       setMarqueeStart({ x, y });
     }
-  }, [store, screenToImage, hitTestAnnotation, hitTestHandle, openLabelEditor, openTextEditor, isProfileLabel, selectedIdList, sendCursorIfNeeded, cancelPanAnimation]);
+  }, [store, screenToImage, hitTestAnnotation, hitTestHandle, openLabelEditor, openTextEditor, selectedIdList, sendCursorIfNeeded, cancelPanAnimation]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.pointerType !== "touch" && e.pointerType !== "pen") {
@@ -3287,7 +3426,7 @@ export const ImageAnnotator = () => {
         if (store.mode === "viewport") {
           const hasProfileSelection = selected.some((id) => {
             const ann = store.annotations.find((annotation) => annotation.id === id);
-            return ann ? isProfileLabel(ann.label) : false;
+            return ann ? isProfileLabelName(ann.label) : false;
           });
 
           if (hasProfileSelection) {
@@ -3295,7 +3434,7 @@ export const ImageAnnotator = () => {
               .reverse()
               .find((id) => {
                 const ann = store.annotations.find((annotation) => annotation.id === id);
-                return ann ? isProfileLabel(ann.label) : false;
+                return ann ? isProfileLabelName(ann.label) : false;
               });
 
             if (lastProfileId) {
@@ -3313,7 +3452,7 @@ export const ImageAnnotator = () => {
     }
 
     resetInteractionState();
-  }, [store, drawStart, screenToImage, imageToScreen, marqueeStart, isProfileLabel, selectedIdList, cancelPanAnimation, resetInteractionState]);
+  }, [store, drawStart, screenToImage, imageToScreen, marqueeStart, selectedIdList, cancelPanAnimation, resetInteractionState]);
 
   const handleWheel = useCallback((e: WheelEvent) => {
     const canvas = canvasRef.current;
@@ -3416,6 +3555,23 @@ export const ImageAnnotator = () => {
         return;
       }
 
+      // Cycle through overlapping annotations with Tab (check first before other keys)
+      if (e.key === "Tab") {
+        if (overlappingAnnotations.length > 1 && lastClickPositionRef.current) {
+          e.preventDefault();
+          const nextIndex = (overlappingIndex + 1) % overlappingAnnotations.length;
+          setOverlappingIndex(nextIndex);
+          const nextAnn = overlappingAnnotations[nextIndex];
+          if (nextAnn) {
+            store.setSelected([nextAnn.id]);
+            toast.info(`Selected: ${nextAnn.label || "Annotation"} (${nextIndex + 1}/${overlappingAnnotations.length})`, { 
+              duration: 1500 
+            });
+          }
+          return;
+        }
+      }
+
       // Mode switching
       const key = e.key;
       const normalizedKey = key.length === 1 ? key.toLowerCase() : key;
@@ -3505,7 +3661,7 @@ export const ImageAnnotator = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingEdits, resetInteractionState]);
+  }, [store, zoomAt, fitToScreen, editingId, handleOverlayDismiss, activeProfileEditId, commitPendingEdits, resetInteractionState, overlappingAnnotations, overlappingIndex]);
 
   // Note: Annotations are now automatically saved when they're created/modified/deleted
   // They're loaded when an image is loaded via loadImageToCanvas
@@ -3729,6 +3885,26 @@ export const ImageAnnotator = () => {
       profileCsvPath: asset.profileCsvPath,
     })));
   }, []);
+
+  useEffect(() => {
+    if (!store.image || !canvasRef.current) return;
+ 
+    render();
+    if (imageFileName && currentImageId) {
+      console.debug("[ImageAnnotator][Debug] Active image", {
+        id: currentImageId,
+        name: imageFileName,
+      });
+    }
+ 
+    const observer = new ResizeObserver(() => {
+      render();
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [store, imageFileName, currentImageId]);
 
   return (
     <div 
@@ -4412,8 +4588,8 @@ export const ImageAnnotator = () => {
         <LegendPanel
           items={legendItems}
           mode={store.mode}
-          activeItemId={store.activeLabel}
-          onSelect={(id) => store.setActiveLabel(id)}
+          activeItemId={legendActiveItemId}
+          onSelect={legendOnSelect}
         />
       </div>
     </div>

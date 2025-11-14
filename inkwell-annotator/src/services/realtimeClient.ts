@@ -57,7 +57,7 @@ type RealtimeClientOptions = {
   onCursorUpdate?: Listener<{ userId: string; payload: Record<string, unknown> }>;
   onPresenceJoin?: Listener<{ userId: string; name?: string }>;
   onPresenceLeave?: Listener<{ userId: string }>;
-  onSelectionUpdate?: Listener<{ userId: string; annotationId: string | null }>;
+  onSelectionUpdate?: Listener<{ userId: string; annotationId: string | null; imageId?: string | null }>;
   localUserId?: string | null;
 };
 
@@ -245,9 +245,14 @@ export class RealtimeClient {
         break;
       case "selection:update":
         if (message.user?.id) {
+          const payloadImageId =
+            (message.payload?.image_id as string | undefined) ??
+            (message.payload?.imageId as string | undefined) ??
+            null;
           this.opts.onSelectionUpdate?.({
             userId: message.user.id,
             annotationId: message.selection_id ?? null,
+            imageId: payloadImageId ?? null,
           });
         }
         break;
@@ -274,20 +279,24 @@ export class RealtimeClient {
     this.socket.send(JSON.stringify({ type, payload }));
   }
 
-  updateCursor(payload: { imageX: number; imageY: number; tool?: string; color?: string }) {
+  updateCursor(payload: { imageX: number; imageY: number; tool?: string; color?: string; imageId?: string | null }) {
     if (!this.isOpen) return;
     this.send("cursor:update", {
       x: payload.imageX,
       y: payload.imageY,
       tool: payload.tool,
       color: payload.color,
+      image_id: payload.imageId ?? undefined,
     });
   }
 
-  updateSelection(annotationId: string | null) {
+  updateSelection(annotationId: string | null, imageId?: string | null) {
     if (!this.isOpen) return;
     if (annotationId) {
-      this.send("selection:update", { annotation_id: annotationId });
+      this.send("selection:update", {
+        annotation_id: annotationId,
+        image_id: imageId ?? undefined,
+      });
     } else {
       this.send("selection:clear", {});
     }

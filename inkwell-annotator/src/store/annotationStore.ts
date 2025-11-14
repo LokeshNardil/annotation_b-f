@@ -42,6 +42,17 @@ const partitionAnnotationsForLazyLoad = (annotations: Annotation[]) => {
   return { profile, deferred };
 };
 
+export type LegendItemConfig = {
+  id: string;
+  name: string;
+  color: string;
+  shortcut?: string;
+};
+
+export type LabelDefinition = LegendItemConfig & {
+  legends?: LegendItemConfig[];
+};
+
 type RemoteAnnotationPayload = {
   id: string;
   viewport_id?: string;
@@ -95,6 +106,33 @@ const generateUuid = (): string => {
 const ensureUuid = (value?: string | null): string => {
   if (value && UUID_REGEX.test(value)) {
     return value;
+  }
+  if (value && value.length > 0) {
+    let seed = 0x811c9dc5;
+    for (let i = 0; i < value.length; i++) {
+      seed ^= value.charCodeAt(i);
+      seed = Math.imul(seed, 0x01000193) >>> 0;
+    }
+    const segment = (offset: number) => {
+      let hash = seed ^ offset;
+      let hex = "";
+      for (let i = 0; i < 4; i++) {
+        hash ^= value.charCodeAt((offset + i) % value.length);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+        hex += hash.toString(16).padStart(8, "0");
+      }
+      return hex;
+    };
+
+    const h1 = segment(0).slice(0, 8);
+    const h2 = segment(1).slice(0, 4);
+    const h3Raw = parseInt(segment(2).slice(0, 4), 16) & 0x0fff;
+    const h3 = (h3Raw | 0x4000).toString(16).padStart(4, "0");
+    const h4Raw = parseInt(segment(3).slice(0, 4), 16) & 0x3fff;
+    const h4 = (h4Raw | 0x8000).toString(16).padStart(4, "0");
+    const h5 = segment(4).slice(0, 12);
+
+    return `${h1}-${h2}-${h3}-${h4}-${h5}`;
   }
   return generateUuid();
 };
@@ -200,15 +238,15 @@ interface AnnotationStore {
   
   // Label state
   activeLabel: string;
-  labels: Array<{ id: string; name: string; color: string; shortcut: string }>;
+  labels: LabelDefinition[];
   
   // Actions
   setImage: (image: HTMLImageElement, url: string) => void;
   setTool: (tool: Tool) => void;
   setMode: (mode: Mode) => void;
   setActiveLabel: (labelId: string) => void;
-  getActiveLabelConfig: () => { id: string; name: string; color: string; shortcut: string } | undefined;
-  getCurrentLabels: () => Array<{ id: string; name: string; color: string; shortcut: string }>;
+  getActiveLabelConfig: () => LabelDefinition | undefined;
+  getCurrentLabels: () => LegendItemConfig[];
   addAnnotation: (annotation: Annotation) => void;
   updateAnnotation: (id: string, updates: Partial<Annotation>) => void;
   deleteAnnotation: (id: string) => void;
@@ -254,7 +292,7 @@ const DEFAULT_COLORS = [
 ];
 
 // Model labels (T1, T2, S15, VerticalBars, etc.)
-export const LABEL_CONFIG = [
+export const LABEL_CONFIG: LabelDefinition[] = [
   { id: "model0", name: "T1", color: "rgb(59, 130, 246)", shortcut: "0" }, // blue
   { id: "model1", name: "T2", color: "rgb(16, 185, 129)", shortcut: "1" }, // green
   { id: "model2", name: "S15", color: "rgb(249, 115, 22)", shortcut: "2" }, // orange
@@ -267,7 +305,7 @@ export const LABEL_CONFIG = [
 ];
 
 // OCR labels (Sheetno, Detailno, Scale, etc.)
-export const OCR_LABEL_CONFIG = [
+export const OCR_LABEL_CONFIG: LabelDefinition[] = [
   { id: "ocr0", name: "Sheetno", color: "rgb(59, 130, 246)", shortcut: "0" }, // blue
   { id: "ocr1", name: "Detailno", color: "rgb(16, 185, 129)", shortcut: "1" }, // green
   { id: "ocr2", name: "Scale", color: "rgb(249, 115, 22)", shortcut: "2" }, // orange
@@ -280,16 +318,106 @@ export const OCR_LABEL_CONFIG = [
 ];
 
 // Profile labels (Column Schedule, Column Section, Wall Schedule, etc.)
-export const PROFILE_LABEL_CONFIG = [
-  { id: "profile0", name: "Column Schedule", color: "rgb(59, 130, 246)", shortcut: "0" }, // blue
-  { id: "profile1", name: "Column Section", color: "rgb(16, 185, 129)", shortcut: "1" }, // green
-  { id: "profile2", name: "Wall Schedule", color: "rgb(249, 115, 22)", shortcut: "2" }, // orange
-  { id: "profile3", name: "Beam Schedule", color: "rgb(239, 68, 68)", shortcut: "3" }, // red
-  { id: "profile4", name: "Slab Schedule", color: "rgb(168, 85, 247)", shortcut: "4" }, // purple
-  { id: "profile5", name: "Foundation Schedule", color: "rgb(236, 72, 153)", shortcut: "5" }, // pink
-  { id: "profile6", name: "Detail Section", color: "rgb(34, 197, 94)", shortcut: "6" }, // green
-  { id: "profile7", name: "Elevation", color: "rgb(251, 146, 60)", shortcut: "7" }, // orange
-  { id: "profile8", name: "Plan View", color: "rgb(139, 92, 246)", shortcut: "8" }, // violet
+export const PROFILE_LABEL_CONFIG: LabelDefinition[] = [
+  {
+    id: "profile0",
+    name: "Column Schedule",
+    color: "rgb(59, 130, 246)",
+    shortcut: "0",
+    legends: [
+      { id: "profile0-grid-reference", name: "Grid Reference", color: "#3b82f6" },
+      { id: "profile0-column-id", name: "Column ID Tag", color: "#38bdf8" },
+      { id: "profile0-elevation-note", name: "Elevation Note", color: "#6366f1" },
+    ],
+  },
+  {
+    id: "profile1",
+    name: "Column Section",
+    color: "rgb(16, 185, 129)",
+    shortcut: "1",
+    legends: [
+      { id: "profile1-tie-reinforcement", name: "Tie Reinforcement", color: "#10b981" },
+      { id: "profile1-clear-cover", name: "Clear Cover", color: "#22c55e" },
+      { id: "profile1-section-mark", name: "Section Mark", color: "#6ee7b7" },
+    ],
+  },
+  {
+    id: "profile2",
+    name: "Wall Schedule",
+    color: "rgb(249, 115, 22)",
+    shortcut: "2",
+    legends: [
+      { id: "profile2-wall-id", name: "Wall Identification", color: "#f97316" },
+      { id: "profile2-opening", name: "Opening Location", color: "#fb923c" },
+      { id: "profile2-control-joint", name: "Control Joint", color: "#f59e0b" },
+    ],
+  },
+  {
+    id: "profile3",
+    name: "Beam Schedule",
+    color: "rgb(239, 68, 68)",
+    shortcut: "3",
+    legends: [
+      { id: "profile3-beam-reference", name: "Beam Reference", color: "#ef4444" },
+      { id: "profile3-support", name: "Support Bearing", color: "#f97316" },
+      { id: "profile3-camber-note", name: "Camber Note", color: "#fb7185" },
+    ],
+  },
+  {
+    id: "profile4",
+    name: "Slab Schedule",
+    color: "rgb(168, 85, 247)",
+    shortcut: "4",
+    legends: [
+      { id: "profile4-slab-span", name: "Slab Span", color: "#a855f7" },
+      { id: "profile4-drop-panel", name: "Drop Panel", color: "#c084fc" },
+      { id: "profile4-reinforcement", name: "Top Reinforcement", color: "#d946ef" },
+    ],
+  },
+  {
+    id: "profile5",
+    name: "Foundation Schedule",
+    color: "rgb(236, 72, 153)",
+    shortcut: "5",
+    legends: [
+      { id: "profile5-footing-size", name: "Footing Size", color: "#ec4899" },
+      { id: "profile5-pedestal", name: "Pedestal", color: "#f472b6" },
+      { id: "profile5-anchor-bolt", name: "Anchor Bolt", color: "#f9a8d4" },
+    ],
+  },
+  {
+    id: "profile6",
+    name: "Detail Section",
+    color: "rgb(34, 197, 94)",
+    shortcut: "6",
+    legends: [
+      { id: "profile6-cutting-plane", name: "Cutting Plane", color: "#22d3ee" },
+      { id: "profile6-section-depth", name: "Section Depth", color: "#0ea5e9" },
+      { id: "profile6-material-note", name: "Material Note", color: "#38bdf8" },
+    ],
+  },
+  {
+    id: "profile7",
+    name: "Elevation",
+    color: "rgb(251, 146, 60)",
+    shortcut: "7",
+    legends: [
+      { id: "profile7-level-marker", name: "Level Marker", color: "#facc15" },
+      { id: "profile7-window-head", name: "Window Head", color: "#eab308" },
+      { id: "profile7-facade-finish", name: "Facade Finish", color: "#fde047" },
+    ],
+  },
+  {
+    id: "profile8",
+    name: "Plan View",
+    color: "rgb(139, 92, 246)",
+    shortcut: "8",
+    legends: [
+      { id: "profile8-grid-line", name: "Grid Line", color: "#14b8a6" },
+      { id: "profile8-core-boundary", name: "Core Boundary", color: "#2dd4bf" },
+      { id: "profile8-room-tag", name: "Room Tag", color: "#5eead4" },
+    ],
+  },
 ];
 
 // Legacy DEFAULT_LABELS for backward compatibility
@@ -613,15 +741,7 @@ export const useAnnotationStore = createWithEqualityFn<AnnotationStore>((set, ge
   },
 
   getCurrentLabels: () => {
-    const { mode } = get();
-    if (mode === "model") {
-      return LABEL_CONFIG;
-    } else if (mode === "ocr") {
-      return OCR_LABEL_CONFIG;
-    } else if (mode === "viewport") {
-      return PROFILE_LABEL_CONFIG;
-    }
-    return LABEL_CONFIG; // Default fallback
+    return get().labels;
   },
 
   // Persistence actions
@@ -712,11 +832,11 @@ export const useAnnotationStore = createWithEqualityFn<AnnotationStore>((set, ge
         console.log(
           `[ImageAnnotator] Loaded ${profile.length} profile annotation(s) and ${deferred.length} deferred child annotation(s) from storage.`
         );
-        const categoryBreakdown = annotationsWithLabels.reduce<Record<string, number>>((acc, ann) => {
+        const categoryBreakdown = annotationsWithLabels.reduce((acc: Record<string, number>, ann) => {
           const key = ann.category ?? "unclassified";
           acc[key] = (acc[key] ?? 0) + 1;
           return acc;
-        }, {});
+        }, {} as Record<string, number>);
         console.log("[ImageAnnotator] Category breakdown from storage", categoryBreakdown);
 
         set((state) => ({
